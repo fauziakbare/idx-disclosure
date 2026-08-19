@@ -1,10 +1,9 @@
-"""In-Browser Fetch Engine.
+"""In-Browser Fetch Engine via Playwright Network Response Interception.
 
-Launch Playwright Chromium headless, open IDX announcement page to establish a
-valid browser session (cookies/CAPTCHA context), then execute the
-GetAnnouncement fetch directly inside the page via page.evaluate. This reuses
-the browser's real TLS session + cookies to bypass WAF 403 on cloud runners.
-No curl_cffi request needed for the announcement list.
+Launch Playwright Chromium headless, open the IDX announcement page, and hook
+the browser's network stream to capture the official GetAnnouncement JSON
+response directly. Reusing the browser's real TLS session + cookies bypasses
+WAF 403 on cloud runners (GitHub Actions). No curl_cffi request needed.
 """
 
 from __future__ import annotations
@@ -21,28 +20,27 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-IDX_PAGE_URL = "https://www.idx.co.id/id/berita/pengumuman/"
+IDX_ANNOUNCEMENT_PAGE = "https://www.idx.co.id/id/berita/pengumuman/"
 IDX_BASE_URL = "https://www.idx.co.id"
-# Default announcement API (primary /NewsAnnouncement endpoint).
-IDX_API_URL = (
-    "https://www.idx.co.id/primary/NewsAnnouncement/GetAnnouncement"
-)
+# Default announcement API (ListedCompany) proven to work from in-browser fetch.
+IDX_API_URL = "https://www.idx.co.id/primary/ListedCompany/GetAnnouncement"
 
 # Browser args to reduce automation fingerprinting.
 BROWSER_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
     "--disable-blink-features=AutomationControlled",
     "--disable-infobars",
     "--window-size=1920,1080",
 ]
 
-# Shared request headers (kept for pdf_parser download compatibility).
+# Shared request headers.
 BASE_HEADERS = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": IDX_PAGE_URL,
+    "Referer": IDX_ANNOUNCEMENT_PAGE,
     "Origin": "https://www.idx.co.id",
     "Sec-Fetch-Dest": "empty",
     "Sec-Fetch-Mode": "cors",
@@ -66,13 +64,26 @@ def _normalize_date(date_str: str | None) -> str | None:
     return stripped if len(stripped) == 8 else None
 
 
-async def _fetch_in_browser(
-    api_url: str,
-    page: int,
-    page_size: int,
-) -> list[dict[str, Any]]:
-    """Open IDX page in headless Chromium, then fetch announcements in-page."""
+async def fetch_disclosures(limit: int = 30, **kwargs: Any) -> list[dict[str, Any]]:
+    """Fetch IDX announcements by intercepting the official network response.
+
+    Opens the IDX announcement page in headless Chromium and captures the
+    GetAnnouncement JSON stream via Playwright's `page.on("response")`. This
+    reuses the browser's real TLS session + cookies, bypassing WAF 403 on
+    cloud runners.
+
+    Args:
+        limit: Max number of announcements to return.
+        **kwargs: Absorb legacy caller params (base_url, page, page_size,
+            date_from, date_to, emiten_code) for backward compatibility.
+
+    Returns:
+        List of normalized announcement dicts (Replies JSON).
+    """
     from playwright.async_api import async_playwright
+
+    captured_raw: list[dict[str, Any]] = []
+    page_size = kwargs.get("page_size") or limit
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -89,41 +100,150 @@ async def _fetch_in_browser(
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
-        page_obj = await context.new_page()
+        page = await context.new_page()
 
-        # URL with indexFrom/pageSize. Date filters intentionally omitted so the
-        # endpoint's default (all announcements) is used; avoids WAF fingerprinting.
-        fetch_url = f"{api_url}?indexFrom={page}&pageSize={page_size}"
-        logger.info("Opening IDX announcement page in headless Chromium...")
-        await page_obj.goto(
-            IDX_PAGE_URL,
-            wait_until="networkidle",
-            timeout=60_000,
-        )
-        await asyncio.sleep(2)
+        # Handler to capture GetAnnouncement network responses
+        async def handle_response(response: Any) -> None:
+            if "GetAnnouncement" in response.url and response.status == 200:
+                try:
+                    data = await response.json()
+                    replies = (
+                        data.get("Replies")
+                        or data.get("replies")
+                        or data.get("data")
+                        or []
+                    )
+                    if replies:
+                        captured_raw.extend(replies)
+                        logger.info(
+                            "Captured %d disclosures from network stream.",
+                            len(replies),
+                        )
+                except Exception as e:
+                    logger.debug("Failed to parse intercepted response: %s", e)
 
-        logger.info("Fetching announcements in-browser: %s", fetch_url)
-        raw_data = await page_obj.evaluate(
-            f"""
-            async () => {{
-                const response = await fetch('{fetch_url}', {{
-                    headers: {{
-                        'Accept': 'application/json, text/plain, */*',
-                        'X-Requested-With': 'XMLHttpRequest'
-                    }}
-                }});
-                if (!response.ok) {{
-                    throw new Error('In-browser fetch failed with status: ' + response.status);
-                }}
-                return await response.json();
-            }}
-            """
-        )
+        page.on("response", handle_response)
+
+        logger.info("Navigating to IDX announcement page...")
+        for attempt in range(1, 4):
+            try:
+                # domcontentloaded (NOT networkidle) — IDX streams data forever,
+                # so networkidle never fires and times out.
+                await page.goto(
+                    IDX_ANNOUNCEMENT_PAGE,
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+                logger.info("Opened IDX page. Waiting for AJAX stream...")
+                await asyncio.sleep(4)  # Wait for AJAX / XHR to complete
+
+                # If the page's own stream didn't populate captured_raw
+                # (e.g. different endpoint variant loaded), trigger the known
+                # announcement API from within the page. This also passes through
+                # page.on("response") and gets captured by our handler.
+                if not captured_raw:
+                    try:
+                        logger.info(
+                            "Triggering announcement API in-browser: %s?indexFrom=0&pageSize=%s",
+                            IDX_API_URL,
+                            page_size,
+                        )
+                        await page.evaluate(
+                            f"""
+                            async (pageSize) => {{
+                                const response = await fetch('{IDX_API_URL}?indexFrom=0&pageSize=' + pageSize, {{
+                                    headers: {{
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'X-Requested-With': 'XMLHttpRequest'
+                                    }}
+                                }});
+                                if (!response.ok) {{
+                                    throw new Error('In-browser fetch failed with status: ' + response.status);
+                                }}
+                                return await response.json();
+                            }}
+                            """,
+                            page_size,
+                        )
+                        await asyncio.sleep(2)  # Let the response handler capture it
+                    except Exception as e:
+                        logger.debug("In-browser API trigger failed: %s", e)
+
+                if captured_raw:
+                    logger.info(
+                        "Network stream captured %d items on attempt %d",
+                        len(captured_raw),
+                        attempt,
+                    )
+                    if len(captured_raw) >= page_size:
+                        break
+                    # Trigger another fetch to fill page_size (pagination fill)
+                    try:
+                        extra = await page.evaluate(
+                            f"""
+                            async (pageSize) => {{
+                                const response = await fetch('{IDX_API_URL}?indexFrom=1&pageSize=' + pageSize, {{
+                                    headers: {{
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'X-Requested-With': 'XMLHttpRequest'
+                                    }}
+                                }});
+                                if (!response.ok) {{
+                                    throw new Error('In-browser fetch failed with status: ' + response.status);
+                                }}
+                                return await response.json();
+                            }}
+                            """,
+                            page_size,
+                        )
+                        extra_replies = (
+                            extra.get("Replies")
+                            or extra.get("replies")
+                            or extra.get("data")
+                            or []
+                        )
+                        if extra_replies:
+                            captured_raw.extend(extra_replies)
+                            logger.info(
+                                "Extended capture with %d additional items.",
+                                len(extra_replies),
+                            )
+                        break
+                    except Exception as e:
+                        logger.debug("In-page pagination fill failed: %s", e)
+                    break
+
+                logger.warning("Attempt %d: No data intercepted yet, retrying trigger...", attempt)
+                await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                await asyncio.sleep(4)
+            except Exception as e:
+                logger.warning("Attempt %d navigation error: %s", attempt, e)
+                await asyncio.sleep(3)
+
         await browser.close()
 
-    items = raw_data.get("Replies") or raw_data.get("replies") or raw_data.get("data") or []
-    logger.info("Successfully fetched %d raw announcements via browser", len(items))
-    return _normalize_replies(items)
+    if not captured_raw:
+        raise RuntimeError(
+            "Failed to intercept IDX announcements via Playwright network stream."
+        )
+
+    # Deduplicate by announcement id if present, keep first occurrence order
+    seen: set[str] = set()
+    unique_raw: list[dict[str, Any]] = []
+    for item in captured_raw:
+        pengumuman = item.get("pengumuman") or {}
+        key = str(pengumuman.get("Id2") or pengumuman.get("NoPengumuman") or id(item))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_raw.append(item)
+
+    normalized = _normalize_replies(unique_raw)
+    logger.info(
+        "Returning %d disclosures (intercepted via network stream)",
+        len(normalized[:limit]),
+    )
+    return normalized[:limit]
 
 
 async def fetch_announcements(
@@ -135,45 +255,25 @@ async def fetch_announcements(
     emiten_code: str | None = None,
     **kwargs: Any,
 ) -> list[dict[str, Any]]:
-    """Fetch IDX announcements via in-browser evaluate (bypass WAF 403).
+    """Backward-compatible wrapper. Routes to network-interception fetch.
 
-    Args:
-        page: Page index (maps to API indexFrom).
-        page_size: Number of items per page.
-        date_to: Kept for backward compatibility; ignored by the browser fetch.
-        base_url: Override default IDX API URL (uses primary endpoint otherwise).
-        date_from: Kept for backward compatibility; ignored by the browser fetch.
-        emiten_code: Ignored; announcement endpoint returns all emiten.
-        **kwargs: Absorb extra caller params for forward-compatibility.
-
-    Returns:
-        List of announcement dicts from key 'Replies' / 'replies'.
+    Legacy param names are absorbed; `page_size` maps to `limit`.
     """
-    api_url = (base_url if base_url else IDX_API_URL).rstrip("/")
-
-    max_retries = len(RETRY_DELAYS)
-    last_err: Exception | None = None
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            items = await _fetch_in_browser(api_url, page, page_size)
-            logger.info(
-                "Fetched %d announcements (in-browser attempt %d)",
-                len(items),
-                attempt,
-            )
-            return items
-        except Exception as e:
-            last_err = e
-            logger.warning("In-browser fetch attempt %d failed: %s", attempt, e)
-            if attempt < max_retries:
-                backoff = RETRY_DELAYS[attempt - 1]
-                logger.info("Retrying in %ds...", backoff)
-                await asyncio.sleep(backoff)
-
-    raise RuntimeError(
-        f"All {max_retries} in-browser fetch attempts failed. Last error: {last_err}"
+    return await fetch_disclosures(
+        limit=page_size,
+        base_url=base_url,
+        page=page,
+        page_size=page_size,
+        date_from=date_from,
+        date_to=date_to,
+        emiten_code=emiten_code,
+        **kwargs,
     )
+
+
+# Keep backward-compatible alias: fetch_disclosures is the primary entrypoint.
+# Note: fetch_disclosures is now the canonical implementation above;
+# fetch_announcements delegates to it. Do NOT reassign this alias.
 
 
 def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
@@ -206,6 +306,7 @@ def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
         "pdf_url": pdf_url,
         "all_pdf_urls": all_pdf_urls,
         "tanggal": pengumuman.get("TglPengumuman", ""),
+        "release_date": pengumuman.get("TglPengumuman", ""),
         "jenis": pengumuman.get("JenisPengumuman", ""),
         "no_pengumuman": pengumuman.get("NoPengumuman", ""),
         "_raw": raw,
@@ -215,7 +316,3 @@ def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
 def _normalize_replies(replies: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalize all raw IDX replies to flat dicts."""
     return [_normalize_item(r) for r in replies]
-
-
-# Keep backward-compatible alias
-fetch_disclosures = fetch_announcements

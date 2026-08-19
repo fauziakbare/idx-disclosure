@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pymupdf as fitz  # PyMuPDF (modern import; deprecated 'fitz' alias)
@@ -18,11 +19,13 @@ PDF_RETRY_DELAYS = [3, 6, 9]
 MIN_TEXT_LENGTH = 100
 
 
-async def _download_pdf_via_browser(pdf_url: str) -> bytes:
+async def download_pdf_via_browser(pdf_url: str) -> bytes:
     """Download PDF via in-page fetch (reuses browser TLS session/cookies).
 
-    Fallback when curl_cffi gets 403. Fetches PDF inside the loaded IDX page and
-    returns bytes, avoiding 403 that context.request.get triggers on cloud WAF.
+    Fallback when curl_cffi gets 403. Opens the IDX page first to establish a
+    valid browser session (cf_clearance / __cf_bm), then fetches the PDF inside
+    the page context and returns bytes. Avoids the 403 that a direct
+    `page.goto(pdf_url)` raises ("Download is starting") on cloud WAF.
     """
     import base64
 
@@ -42,12 +45,15 @@ async def _download_pdf_via_browser(pdf_url: str) -> bytes:
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await context.new_page()
+
+        # Establish browser session first (sets WAF cookies)
         try:
             await page.goto(
                 "https://www.idx.co.id/id/berita/pengumuman/",
                 wait_until="domcontentloaded",
                 timeout=60_000,
             )
+            await asyncio.sleep(2)
         except Exception as e:
             logger.warning("PDF browser page load issue (non-fatal): %s", e)
 
@@ -185,8 +191,6 @@ async def extract_pdf(
     # Download PDF as bytes using curl_cffi (TLS impersonation to bypass Cloudflare)
     pdf_bytes = b""
     if pdf_url:
-        import asyncio as _asyncio
-
         # Full chrome124 header set shared with API fetcher (UA + Referer identical).
         headers = dict(BASE_HEADERS)
         max_retries = len(PDF_RETRY_DELAYS)
@@ -202,12 +206,12 @@ async def extract_pdf(
             except Exception as e:
                 logger.warning("PDF download attempt %d/%d failed for %s: %s", attempt + 1, max_retries, pdf_url, e)
                 if attempt < max_retries - 1:
-                    await _asyncio.sleep(PDF_RETRY_DELAYS[attempt])
+                    await asyncio.sleep(PDF_RETRY_DELAYS[attempt])
                 else:
                     # Final curl_cffi failure: fallback to Playwright browser TLS session
                     logger.error("PDF download failed after %d retries for %s; trying browser fallback", max_retries, pdf_url)
                     try:
-                        pdf_bytes = await _download_pdf_via_browser(pdf_url)
+                        pdf_bytes = await download_pdf_via_browser(pdf_url)
                         logger.info("PDF downloaded via browser fallback: %d bytes", len(pdf_bytes))
                     except Exception as browser_err:
                         logger.error("Browser PDF fallback also failed for %s: %s", pdf_url, browser_err)
