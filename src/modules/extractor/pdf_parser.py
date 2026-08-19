@@ -46,6 +46,10 @@ async def download_pdf_via_browser(pdf_url: str) -> bytes:
         )
         page = await context.new_page()
 
+        # Apply stealth evasions before navigating to target URL
+        from playwright_stealth import Stealth
+        await Stealth().apply_stealth_async(page)
+
         # Establish browser session first (sets WAF cookies)
         try:
             await page.goto(

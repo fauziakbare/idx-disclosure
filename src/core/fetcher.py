@@ -102,6 +102,18 @@ async def fetch_disclosures(limit: int = 30, **kwargs: Any) -> list[dict[str, An
         )
         page = await context.new_page()
 
+        # Apply stealth evasions (mask CDP, WebGL, navigator, plugins)
+        from playwright_stealth import Stealth
+        await Stealth().apply_stealth_async(page)
+
+        # Realistic viewport & UA headers
+        await page.set_extra_http_headers({
+            "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+        })
+
         # Handler to capture GetAnnouncement network responses
         async def handle_response(response: Any) -> None:
             if "GetAnnouncement" in response.url and response.status == 200:
