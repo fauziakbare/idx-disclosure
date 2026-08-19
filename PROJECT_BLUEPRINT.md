@@ -340,3 +340,4 @@ Setelah selesai mengimplementasikan dan memverifikasi kode berjalan tanpa error,
 | Tanggal | Versi | Perubahan |
 |---------|-------|-----------|
 | 2025-07-09 | v1.0 | Inisialisasi blueprint. Endpoint IDX terverifikasi 200 OK. Arsitektur model-agnostic via `.env`. Scope MVP dibatasi ke Dual-Role (Triage + Reasoner). Semua task masih pending. |
+| 2026-08-20 | v1.1 | Perkuat anti-WAF IDX: Playwright launch args anti-detection + stealth headers + navigator.webdriver masking + locale/timezone; samakan header USER_AGENT/Referer pada curl_cffi API & PDF download; backoff bertahap 3s/6s/9s saat 403. |

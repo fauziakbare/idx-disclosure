@@ -1,6 +1,6 @@
 """Hybrid Auto-Resolver Fetch Engine.
 
-Playwright headless ~2.5s solely to harvest cookies from IDX page,
+Playwright headless ~4s solely to harvest cookies from IDX page,
 then curl_cffi (impersonate chrome124) hits official GetAnnouncement API.
 No DOM scraping. No wait_for_selector on tables.
 """
@@ -16,9 +16,39 @@ from curl_cffi.requests import AsyncSession
 
 from src.core.logger import logger
 
-IDX_PAGE_URL = "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi"
+# Identical UA shared across Playwright browser and curl_cffi requests.
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+IDX_PAGE_URL = "https://www.idx.co.id/id/berita/pengumuman/"
 IDX_API_URL = "https://www.idx.co.id/primary/ListedCompany/GetAnnouncement"
 IDX_BASE_URL = "https://www.idx.co.id"
+
+# Browser args to reduce automation fingerprinting.
+BROWSER_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-infobars",
+    "--window-size=1920,1080",
+]
+
+# Shared request headers for API + PDF downloads (chrome124 impersonation).
+BASE_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": IDX_PAGE_URL,
+    "Origin": "https://www.idx.co.id",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+}
+
+# 403-specific retry delays in seconds.
+RETRY_DELAYS = [3, 6, 9]
 
 
 def _normalize_date(date_str: str | None) -> str | None:
@@ -38,25 +68,34 @@ def _normalize_date(date_str: str | None) -> str | None:
 
 
 async def _harvest_cookies() -> list[dict[str, str]]:
-    """Launch Chromium headless ~2.5s, load IDX page, return cookies."""
+    """Launch Chromium headless ~4s, load IDX announcement page, return cookies."""
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=BROWSER_ARGS,
         )
-        context = await browser.new_context()
-        # Remove webdriver flag
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1920, "height": 1080},
+            locale="id-ID",
+            timezone_id="Asia/Jakarta",
+        )
+        # Mask navigator.webdriver flag
         await context.add_init_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await context.new_page()
 
         try:
-            await page.goto(IDX_PAGE_URL, wait_until="domcontentloaded", timeout=10_000)
-            # Wait ~2.5s for CF cookies to settle
-            await asyncio.sleep(2.5)
+            await page.goto(
+                IDX_PAGE_URL,
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            # Wait ~4s for session/CF cookies to fully generate
+            await asyncio.sleep(4)
         except Exception as e:
             logger.warning("Playwright page load issue (non-fatal): %s", e)
 
@@ -106,8 +145,8 @@ async def fetch_announcements(
     # Step 1: Harvest cookies via Playwright
     cookies = await _harvest_cookies()
 
-    # Build cookie header string
-    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+    # Build cookie dict for curl_cffi
+    cookie_dict = {c["name"]: c["value"] for c in cookies}
 
     params = {
         "kodeEmiten": emiten_code or "",
@@ -120,14 +159,8 @@ async def fetch_announcements(
         "keyword": "",
     }
 
-    headers = {
-        "Referer": IDX_PAGE_URL,
-        "Accept": "application/json, text/plain, */*",
-        "Cookie": cookie_str,
-    }
-
     # Step 2: curl_cffi request with fresh cookies
-    max_retries = 3
+    max_retries = len(RETRY_DELAYS)
     last_err: Exception | None = None
 
     for attempt in range(1, max_retries + 1):
@@ -136,9 +169,12 @@ async def fetch_announcements(
                 resp = await session.get(
                     api_url,
                     params=params,
-                    headers=headers,
+                    headers=BASE_HEADERS,
+                    cookies=cookie_dict,
                     timeout=30,
                 )
+                if resp.status_code == 403:
+                    raise RuntimeError("HTTP 403 Forbidden (WAF block)")
                 resp.raise_for_status()
                 data = resp.json()
 
@@ -154,7 +190,7 @@ async def fetch_announcements(
             last_err = e
             logger.warning("Attempt %d failed: %s", attempt, e)
             if attempt < max_retries:
-                backoff = 2 ** attempt
+                backoff = RETRY_DELAYS[attempt - 1]
                 logger.info("Retrying in %ds...", backoff)
                 await asyncio.sleep(backoff)
 

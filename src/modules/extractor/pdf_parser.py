@@ -7,8 +7,12 @@ from typing import Any
 import fitz  # pymupdf
 from curl_cffi.requests import AsyncSession
 
+from src.core.fetcher import BASE_HEADERS
 from src.core.llm_client import LLMClient
 from src.core.logger import logger
+
+# PDF download retry delays in seconds (403-gradual backoff).
+PDF_RETRY_DELAYS = [3, 6, 9]
 
 # Minimum text length to consider extraction successful
 MIN_TEXT_LENGTH = 100
@@ -125,22 +129,22 @@ async def extract_pdf(
     if pdf_url:
         import asyncio as _asyncio
 
-        headers = {
-            "referer": "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi",
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        }
-        max_retries = 3
+        # Full chrome124 header set shared with API fetcher (UA + Referer identical).
+        headers = dict(BASE_HEADERS)
+        max_retries = len(PDF_RETRY_DELAYS)
         for attempt in range(max_retries):
             try:
                 async with AsyncSession(impersonate="chrome124") as session:
                     resp = await session.get(pdf_url, headers=headers, timeout=60)
+                    if resp.status_code == 403:
+                        raise RuntimeError("HTTP 403 Forbidden (WAF block)")
                     resp.raise_for_status()
                     pdf_bytes = resp.content
                     break
             except Exception as e:
                 logger.warning("PDF download attempt %d/%d failed for %s: %s", attempt + 1, max_retries, pdf_url, e)
                 if attempt < max_retries - 1:
-                    await _asyncio.sleep(2 ** (attempt + 1))
+                    await _asyncio.sleep(PDF_RETRY_DELAYS[attempt])
                 else:
                     logger.error("PDF download failed after %d retries for %s", max_retries, pdf_url)
                     return {"text": "", "method": "download_failed", "pages_count": 0}
