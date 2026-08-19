@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import re
 import sys
+import time
 from typing import Any
 
 from src.config.settings import settings
+from src.core.logger import logger, setup_logging
 from src.core.db import (
     get_draft_threads,
     get_draft_x,
@@ -25,11 +26,7 @@ from src.modules.filter.stage1_regex import stage1_filter as filter_stage1
 from src.modules.filter.triage import triage_batch
 from src.notifier.telegram_bot import TelegramCommandBot, TelegramNotifier
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
+setup_logging()
 
 
 # --- Callback handler formatters ---
@@ -181,7 +178,12 @@ async def run_pipeline(*, force: bool = False) -> None:
 
     # Stage 1: Regex pre-filter
     stage1_results = filter_stage1(raw_disclosures)
-    logger.info("Stage-1 regex filter: %d passed out of %d", len(stage1_results), len(raw_disclosures))
+    logger.info(
+        "Stage-1 regex filter: %d passed out of %d",
+        len(stage1_results),
+        len(raw_disclosures),
+        extra={"module": "stage1", "filter_status": "TRIAGED"},
+    )
 
     if not stage1_results:
         logger.info("No disclosures passed Stage-1 filter. Pipeline complete.")
@@ -205,13 +207,19 @@ async def run_pipeline(*, force: bool = False) -> None:
     )
 
     for item in material_items:
+        item_t0 = time.monotonic()
         pdf_url = item.get("pdf_url", "")
         all_pdf_urls = item.get("all_pdf_urls", []) or ([pdf_url] if pdf_url else [])
         emiten_code = item.get("emiten_code", "UNKNOWN")
         title = item.get("title", "Untitled")
         release_date = item.get("release_date", "")
 
-        logger.info("Processing: %s - %s", emiten_code, title)
+        logger.info(
+            "Processing: %s - %s",
+            emiten_code,
+            title,
+            extra={"module": "pipeline", "filter_status": "ANALYZED"},
+        )
         logger.info("Attachment URLs (%d): %s", len(all_pdf_urls), all_pdf_urls)
 
         # Extract text from ALL attachments and join
@@ -287,7 +295,10 @@ async def run_pipeline(*, force: bool = False) -> None:
                 _build_pesan_3(analysis.emiten_code, analysis.draft_threads),
                 parse_mode="Markdown",
             )
-            logger.info("Sent 3 Telegram messages for %s", emiten_code)
+            logger.info(
+                "Sent 3 Telegram messages for %s", emiten_code,
+                extra={"duration_ms": round((time.monotonic() - item_t0) * 1000, 1)},
+            )
         except Exception as e:
             logger.error("Telegram send failed for %s: %s", emiten_code, e)
 

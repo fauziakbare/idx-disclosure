@@ -203,8 +203,8 @@ Catatan: Semua task di bawah masih PENDING (`- [ ]`).
 
 - `[x]` T2.1: Migrasi database ke Turso Cloud.
 - `[x]` T2.2: Setup GitHub Actions workflow (schedule cron jam bursa).
-- `[ ]` T2.3: Implementasi `libsql` client wrapper untuk Turso.
-- `[ ]` T2.4: Konfigurasi logging terpusat.
+- `[x]` T2.3: Implementasi `libsql` client wrapper untuk Turso.
+- `[x]` T2.4: Konfigurasi logging terpusat.
 
 ### Phase 3: Modular Expansion (Future)
 

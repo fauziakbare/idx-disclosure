@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import random
 from typing import Any, Callable, Coroutine
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 TELEGRAM_API_BASE = "https://api.telegram.org/bot{token}"
 

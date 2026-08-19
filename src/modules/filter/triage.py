@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any, Protocol
 
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 TRIAGE_SYSTEM_PROMPT = """\
 You are an IDX disclosure triage analyst. Evaluate whether a disclosure is material for investors.

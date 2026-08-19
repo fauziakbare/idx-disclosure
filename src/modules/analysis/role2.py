@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from enum import Enum
@@ -12,8 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.core.llm_client import LLMClient
-
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 
 class DisclosureType(str, Enum):

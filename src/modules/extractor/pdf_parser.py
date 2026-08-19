@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import fitz  # pymupdf
 from curl_cffi.requests import AsyncSession
 
 from src.core.llm_client import LLMClient
-
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 # Minimum text length to consider extraction successful
 MIN_TEXT_LENGTH = 100

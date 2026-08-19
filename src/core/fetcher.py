@@ -8,14 +8,13 @@ No DOM scraping. No wait_for_selector on tables.
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
 from datetime import datetime
 from typing import Any
 
 from curl_cffi.requests import AsyncSession
 
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 IDX_PAGE_URL = "https://www.idx.co.id/id/perusahaan-tercatat/keterbukaan-informasi"
 IDX_API_URL = "https://www.idx.co.id/primary/ListedCompany/GetAnnouncement"

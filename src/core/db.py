@@ -1,17 +1,20 @@
-"""Async SQLite database layer for disclosure storage."""
+"""Async SQLite/Turso database layer for disclosure storage.
+
+Provides unified async facade over two backends:
+- Local SQLite via ``aiosqlite`` (default, offline MVP)
+- Turso Cloud via ``libsql_client``/``libsql_experimental`` (Phase 2)
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
+import time
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
 from src.config.settings import settings
-
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS disclosures (
@@ -44,26 +47,120 @@ def _db_path() -> str:
         return url.split(":///", 1)[1]
     return url
 
-def _is_turso() -> bool:
+
+def is_turso() -> bool:
+    """True when DATABASE_URL points to libsql:// and token set."""
     return bool(settings.TURSO_AUTH_TOKEN) and settings.DATABASE_URL.startswith("libsql://")
 
-def _turso_client():
-    try:
-        import libsql_client
-        return libsql_client.create_client(settings.DATABASE_URL, auth_token=settings.TURSO_AUTH_TOKEN)
-    except ImportError:
-        pass
-    import libsql_experimental as lsx
-    return lsx.connect(settings.DATABASE_URL, auth_token=settings.TURSO_AUTH_TOKEN)
+
+class TursoClient:
+    """Async wrapper over Turso/libsql (sync client hidden behind asyncio.to_thread).
+
+    Mirrors the subset of aiosqlite API used by this project, so call sites
+    do not branch on backend. Retries transient failures 3x w/ backoff.
+    """
+
+    _MAX_RETRIES = 3
+    _BASE_BACKOFF_S = 1.0
+
+    def __init__(self) -> None:
+        self._client: Any = None
+
+    def _lazy_connect(self) -> Any:
+        """Connect on first use; return raw libsql client."""
+        if self._client is not None:
+            return self._client
+        try:
+            import libsql_client
+
+            client = libsql_client.create_client(
+                settings.DATABASE_URL,
+                auth_token=settings.TURSO_AUTH_TOKEN,
+            )
+            self._client = client
+            logger.info("Turso backend: libsql_client sync client")
+        except ImportError:
+            import libsql_experimental as lsx
+
+            self._client = lsx.connect(
+                settings.DATABASE_URL,
+                auth_token=settings.TURSO_AUTH_TOKEN,
+            )
+            logger.info("Turso backend: libsql_experimental")
+        return self._client
+
+    async def execute(self, sql: str, parameters: list[Any] | None = None) -> Any:
+        """Execute SQL with retry. Returns raw result rows/list."""
+        client = self._lazy_connect()
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                result = await asyncio.to_thread(client.execute, sql, parameters or [])
+                return result
+            except Exception as e:  # transient network / busy
+                last_exc = e
+                if attempt < self._MAX_RETRIES:
+                    delay = self._BASE_BACKOFF_S * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Turso execute attempt %d/%d failed: %s — retry in %.1fs",
+                        attempt,
+                        self._MAX_RETRIES,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
+
+    async def exec_ddl(self, ddl: str) -> None:
+        """Run multi-statement DDL. libsql_client has no executescript;
+        split on ';' and run sequentially."""
+        client = self._lazy_connect()
+        for stmt in ddl.split(";"):
+            s = stmt.strip()
+            if not s:
+                continue
+            try:
+                await asyncio.to_thread(client.execute, s, [])
+            except Exception as e:
+                # ignore "no such table/duplicate index" on re-init for idempotency
+                msg = str(e).lower()
+                if "no such" in msg or "already exists" in msg:
+                    logger.debug("Turso DDL idempotent skip: %s", e)
+                    continue
+                raise
+        logger.info("Turso DDL executed")
+
+    @staticmethod
+    def rows_of(result: Any) -> list[tuple[Any, ...]]:
+        """Normalize result into list of tuples (libsql_client returns Row objects)."""
+        rows = getattr(result, "rows", None)
+        if rows is None:
+            return []
+        return [tuple(r) for r in rows]
+
+
+# Module-level lazy singleton
+_turso: TursoClient | None = None
+
+
+def _get_turso() -> TursoClient:
+    global _turso
+    if _turso is None:
+        _turso = TursoClient()
+    return _turso
+
 
 async def init_db() -> None:
     """Create tables and indexes if not exist."""
-    if _is_turso():
-        _turso_client().execute(_DDL)
+    if is_turso():
+        t = _get_turso()
+        await t.exec_ddl(_DDL)
         logger.info("Database initialized on Turso (%s)", settings.DATABASE_URL)
         return
     path = _db_path()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    import aiosqlite
+
     async with aiosqlite.connect(path) as db:
         await db.executescript(_DDL)
         await db.commit()
@@ -85,7 +182,6 @@ async def save_analysis(
     release_date: str | None = None,
 ) -> None:
     """Upsert disclosure analysis result into database."""
-    path = _db_path()
     sql = """
         INSERT INTO disclosures (
             id, emiten_code, title, release_date, filter_status,
@@ -118,33 +214,63 @@ async def save_analysis(
         json.dumps(draft_x) if draft_x else None,
         json.dumps(draft_threads) if draft_threads else None,
     )
-    if _is_turso():
-        _turso_client().execute(sql, list(values))
+    t0 = time.perf_counter()
+    if is_turso():
+        await _get_turso().execute(sql, list(values))
     else:
+        import aiosqlite
+
+        path = _db_path()
         async with aiosqlite.connect(path) as db:
             await db.execute(sql, values)
             await db.commit()
-    logger.info("Saved analysis for %s (%s)", emiten_code, disclosure_id)
+    logger.info(
+        "Saved analysis for %s (%s)",
+        emiten_code,
+        disclosure_id,
+        extra={"module": "db", "filter_status": filter_status},
+    )
+    logger.debug(
+        "save_analysis duration_ms=%.1f emiten=%s",
+        (time.perf_counter() - t0) * 1000,
+        emiten_code,
+    )
+
+
+async def _fetch_rows(sql: str, sql_params: tuple[Any, ...] | list[Any]) -> list[tuple[Any, ...]]:
+    """Run SELECT and return list of row tuples (backend-agnostic)."""
+    t0 = time.perf_counter()
+    if is_turso():
+        res = await _get_turso().execute(sql, list(sql_params))
+        rows = _get_turso().rows_of(res)
+    else:
+        import aiosqlite
+
+        path = _db_path()
+        async with aiosqlite.connect(path) as db:
+            cursor = await db.execute(sql, sql_params)
+            rows = await cursor.fetchall()
+    logger.debug(
+        "query duration_ms=%.1f sql=%s",
+        (time.perf_counter() - t0) * 1000,
+        sql.split()[0],
+    )
+    return rows
 
 
 async def _get_column(emiten_code: str, column: str) -> Any:
     """Query single JSON column by emiten_code, return latest row."""
-    path = _db_path()
-    sql = f"SELECT {column} FROM disclosures WHERE emiten_code = ? AND {column} IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
-    if _is_turso():
-        res = _turso_client().execute(sql, [emiten_code])
-        rows = res.rows
-        row = rows[0] if rows else None
-    else:
-        async with aiosqlite.connect(path) as db:
-            cursor = await db.execute(sql, (emiten_code,))
-            row = await cursor.fetchone()
-    if row is None or row[0] is None:
+    sql = (
+        f"SELECT {column} FROM disclosures WHERE emiten_code = ? "
+        f"AND {column} IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+    )
+    rows = await _fetch_rows(sql, (emiten_code,))
+    if not rows or rows[0][0] is None:
         return None
     try:
-        return json.loads(row[0])
+        return json.loads(rows[0][0])
     except (json.JSONDecodeError, TypeError):
-        return row[0]
+        return rows[0][0]
 
 
 async def get_draft_x(emiten_code: str) -> Any:
@@ -164,21 +290,16 @@ async def get_financial_analysis(emiten_code: str) -> Any:
 
 async def get_disclosure_detail(emiten_code: str) -> dict[str, Any] | None:
     """Get full disclosure row as dict."""
-    path = _db_path()
     cols = "id, emiten_code, title, release_date, filter_status, urgency_score, is_material, extracted_data, financial_analysis, draft_x, draft_threads, is_sent_to_telegram, created_at, updated_at"
-    sql = "SELECT " + cols + " FROM disclosures WHERE emiten_code = ? ORDER BY updated_at DESC LIMIT 1"
-    if _is_turso():
-        res = _turso_client().execute(sql, [emiten_code])
-        rows = res.rows
-        tup = rows[0] if rows else None
-    else:
-        async with aiosqlite.connect(path) as db:
-            cursor = await db.execute(sql, (emiten_code,))
-            tup = await cursor.fetchone()
-    if tup is None:
+    sql = (
+        "SELECT " + cols + " FROM disclosures "
+        "WHERE emiten_code = ? ORDER BY updated_at DESC LIMIT 1"
+    )
+    rows = await _fetch_rows(sql, (emiten_code,))
+    if not rows:
         return None
     names = [c.strip() for c in cols.split(",")]
-    d = dict(zip(names, tup))
+    d = dict(zip(names, rows[0]))
     for col in ("extracted_data", "financial_analysis", "draft_x", "draft_threads"):
         if d.get(col):
             try:
