@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import fitz  # pymupdf
+import pymupdf as fitz  # PyMuPDF (modern import; deprecated 'fitz' alias)
 from curl_cffi.requests import AsyncSession
 
 from src.core.fetcher import BASE_HEADERS

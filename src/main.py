@@ -12,6 +12,7 @@ from typing import Any
 from src.config.settings import settings
 from src.core.logger import logger, setup_logging
 from src.core.db import (
+    close_db,
     get_draft_threads,
     get_draft_x,
     get_financial_analysis,
@@ -182,7 +183,7 @@ async def run_pipeline(*, force: bool = False) -> None:
         "Stage-1 regex filter: %d passed out of %d",
         len(stage1_results),
         len(raw_disclosures),
-        extra={"module": "stage1", "filter_status": "TRIAGED"},
+        extra={"filter_status": "TRIAGED"},
     )
 
     if not stage1_results:
@@ -218,7 +219,7 @@ async def run_pipeline(*, force: bool = False) -> None:
             "Processing: %s - %s",
             emiten_code,
             title,
-            extra={"module": "pipeline", "filter_status": "ANALYZED"},
+            extra={"filter_status": "ANALYZED"},
         )
         logger.info("Attachment URLs (%d): %s", len(all_pdf_urls), all_pdf_urls)
 
@@ -359,12 +360,16 @@ async def main_async(*, force: bool = False) -> None:
     # Initialize database
     await init_db()
 
-    # Run pipeline
-    await run_pipeline(force=force)
+    try:
+        # Run pipeline
+        await run_pipeline(force=force)
 
-    # Batch mode: do NOT start Telegram polling so the process exits cleanly.
-    # This prevents GitHub Actions runner from hanging on an infinite loop.
-    logger.info("Pipeline finished. Batch mode: skipping TelegramCommandBot.start_polling().")
+        # Batch mode: do NOT start Telegram polling so the process exits cleanly.
+        # This prevents GitHub Actions runner from hanging on an infinite loop.
+        logger.info("Pipeline finished. Batch mode: skipping TelegramCommandBot.start_polling().")
+    finally:
+        # Close Turso client session so no unclosed client remains.
+        await close_db()
 
 
 def _parse_args() -> argparse.Namespace:

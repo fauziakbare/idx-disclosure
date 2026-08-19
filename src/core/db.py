@@ -54,7 +54,7 @@ def is_turso() -> bool:
 
 
 class TursoClient:
-    """Async wrapper over Turso/libsql (sync client hidden behind asyncio.to_thread).
+    """Async wrapper over Turso/libsql (libsql_client async Client).
 
     Mirrors the subset of aiosqlite API used by this project, so call sites
     do not branch on backend. Retries transient failures 3x w/ backoff.
@@ -66,36 +66,27 @@ class TursoClient:
     def __init__(self) -> None:
         self._client: Any = None
 
-    def _lazy_connect(self) -> Any:
-        """Connect on first use; return raw libsql client."""
+    async def _lazy_connect(self) -> Any:
+        """Connect on first use; return raw async libsql client."""
         if self._client is not None:
             return self._client
-        try:
-            import libsql_client
+        from libsql_client.http import HttpClient
 
-            client = libsql_client.create_client(
-                settings.DATABASE_URL,
-                auth_token=settings.TURSO_AUTH_TOKEN,
-            )
-            self._client = client
-            logger.info("Turso backend: libsql_client sync client")
-        except ImportError:
-            import libsql_experimental as lsx
-
-            self._client = lsx.connect(
-                settings.DATABASE_URL,
-                auth_token=settings.TURSO_AUTH_TOKEN,
-            )
-            logger.info("Turso backend: libsql_experimental")
+        http_url = settings.DATABASE_URL.replace("libsql://", "https://", 1)
+        self._client = HttpClient(
+            http_url,
+            auth_token=settings.TURSO_AUTH_TOKEN,
+        )
+        logger.info("Turso backend: libsql_client HttpClient (https)")
         return self._client
 
     async def execute(self, sql: str, parameters: list[Any] | None = None) -> Any:
         """Execute SQL with retry. Returns raw result rows/list."""
-        client = self._lazy_connect()
+        client = await self._lazy_connect()
         last_exc: Exception | None = None
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                result = await asyncio.to_thread(client.execute, sql, parameters or [])
+                result = await client.execute(sql, parameters or [])
                 return result
             except Exception as e:  # transient network / busy
                 last_exc = e
@@ -114,13 +105,13 @@ class TursoClient:
     async def exec_ddl(self, ddl: str) -> None:
         """Run multi-statement DDL. libsql_client has no executescript;
         split on ';' and run sequentially."""
-        client = self._lazy_connect()
+        client = await self._lazy_connect()
         for stmt in ddl.split(";"):
             s = stmt.strip()
             if not s:
                 continue
             try:
-                await asyncio.to_thread(client.execute, s, [])
+                await client.execute(s, [])
             except Exception as e:
                 # ignore "no such table/duplicate index" on re-init for idempotency
                 msg = str(e).lower()
@@ -138,6 +129,14 @@ class TursoClient:
             return []
         return [tuple(r) for r in rows]
 
+    async def close(self) -> None:
+        """Close underlying client session (async-safe, idempotent)."""
+        if self._client is None:
+            return
+        client = self._client
+        self._client = None
+        await client.close()
+
 
 # Module-level lazy singleton
 _turso: TursoClient | None = None
@@ -148,6 +147,15 @@ def _get_turso() -> TursoClient:
     if _turso is None:
         _turso = TursoClient()
     return _turso
+
+
+async def close_db() -> None:
+    """Close Turso client session if open. No-op for local sqlite."""
+    global _turso
+    if _turso is not None:
+        await _turso.close()
+        _turso = None
+        logger.info("Turso client session closed")
 
 
 async def init_db() -> None:
@@ -228,7 +236,7 @@ async def save_analysis(
         "Saved analysis for %s (%s)",
         emiten_code,
         disclosure_id,
-        extra={"module": "db", "filter_status": filter_status},
+        extra={"filter_status": filter_status},
     )
     logger.debug(
         "save_analysis duration_ms=%.1f emiten=%s",
