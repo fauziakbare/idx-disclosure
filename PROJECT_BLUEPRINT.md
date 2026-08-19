@@ -341,3 +341,4 @@ Setelah selesai mengimplementasikan dan memverifikasi kode berjalan tanpa error,
 |---------|-------|-----------|
 | 2025-07-09 | v1.0 | Inisialisasi blueprint. Endpoint IDX terverifikasi 200 OK. Arsitektur model-agnostic via `.env`. Scope MVP dibatasi ke Dual-Role (Triage + Reasoner). Semua task masih pending. |
 | 2026-08-20 | v1.1 | Perkuat anti-WAF IDX: Playwright launch args anti-detection + stealth headers + navigator.webdriver masking + locale/timezone; samakan header USER_AGENT/Referer pada curl_cffi API & PDF download; backoff bertahap 3s/6s/9s saat 403. |
+| 2026-08-20 | v1.2 | Ubah strategi pengambilan data ke In-Browser Fetch: fetch announcement via `page.evaluate` langsung dari context Chromium (bypass WAF 403 200 OK, 20 item); PDF download fallback via in-page `page.evaluate` arraybuffer→base64 setelah curl_cffi 403x3 (bypass 403, terverifikasi 9371 bytes). `context.request.get` tetap 403 → ganti in-page fetch. |

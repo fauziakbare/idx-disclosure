@@ -7,7 +7,7 @@ from typing import Any
 import pymupdf as fitz  # PyMuPDF (modern import; deprecated 'fitz' alias)
 from curl_cffi.requests import AsyncSession
 
-from src.core.fetcher import BASE_HEADERS
+from src.core.fetcher import BASE_HEADERS, BROWSER_ARGS, USER_AGENT
 from src.core.llm_client import LLMClient
 from src.core.logger import logger
 
@@ -16,6 +16,64 @@ PDF_RETRY_DELAYS = [3, 6, 9]
 
 # Minimum text length to consider extraction successful
 MIN_TEXT_LENGTH = 100
+
+
+async def _download_pdf_via_browser(pdf_url: str) -> bytes:
+    """Download PDF via in-page fetch (reuses browser TLS session/cookies).
+
+    Fallback when curl_cffi gets 403. Fetches PDF inside the loaded IDX page and
+    returns bytes, avoiding 403 that context.request.get triggers on cloud WAF.
+    """
+    import base64
+
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=BROWSER_ARGS,
+        )
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            locale="id-ID",
+            timezone_id="Asia/Jakarta",
+        )
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = await context.new_page()
+        try:
+            await page.goto(
+                "https://www.idx.co.id/id/berita/pengumuman/",
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+        except Exception as e:
+            logger.warning("PDF browser page load issue (non-fatal): %s", e)
+
+        js = f"""async () => {{
+            const response = await fetch('{pdf_url}', {{
+                headers: {{
+                    'Accept': 'application/pdf,application/octet-stream,*/*',
+                    'Referer': 'https://www.idx.co.id/id/berita/pengumuman/'
+                }}
+            }});
+            if (!response.ok) {{
+                throw new Error('In-page PDF fetch failed with status: ' + response.status);
+            }}
+            const buffer = await response.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            let binary = '';
+            const chunk = 0x8000;
+            for (let i = 0; i < bytes.length; i += chunk) {{
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+            }}
+            return btoa(binary);
+        }}"""
+        b64 = await page.evaluate(js)
+        await browser.close()
+
+    return base64.b64decode(b64)
 
 
 def extract_text_pymupdf(pdf_bytes: bytes) -> str:
@@ -146,8 +204,14 @@ async def extract_pdf(
                 if attempt < max_retries - 1:
                     await _asyncio.sleep(PDF_RETRY_DELAYS[attempt])
                 else:
-                    logger.error("PDF download failed after %d retries for %s", max_retries, pdf_url)
-                    return {"text": "", "method": "download_failed", "pages_count": 0}
+                    # Final curl_cffi failure: fallback to Playwright browser TLS session
+                    logger.error("PDF download failed after %d retries for %s; trying browser fallback", max_retries, pdf_url)
+                    try:
+                        pdf_bytes = await _download_pdf_via_browser(pdf_url)
+                        logger.info("PDF downloaded via browser fallback: %d bytes", len(pdf_bytes))
+                    except Exception as browser_err:
+                        logger.error("Browser PDF fallback also failed for %s: %s", pdf_url, browser_err)
+                        return {"text": "", "method": "download_failed", "pages_count": 0}
 
     # Try PyMuPDF first
     text = extract_text_pymupdf(pdf_bytes)
