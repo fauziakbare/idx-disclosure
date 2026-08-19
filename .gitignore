@@ -1,0 +1,10 @@
+.env
+*.db
+*.db-journal
+.session.json
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.vscode/

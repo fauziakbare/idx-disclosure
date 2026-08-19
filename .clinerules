@@ -1,0 +1,8 @@
+# ATURAN EKSEKUSI CLINE (Project: draft_project)
+1. Sebelum membaca atau mengubah kode, WAJIB baca 'PROJECT_BLUEPRINT.md'.
+2. Patuhi Tech Stack, Arsitektur, dan Batasan yang tertulis di blueprint.
+3. Kerjakan tugas secara atomik sesuai seksi 'Execution Checklist & Cline Prompts'.
+4. DILARANG menambahkan library luar tanpa konfirmasi user.
+5. Pertahankan task yang sudah diberi tanda selesai (`- [x]`).
+6. Setelah tugas selesai, WAJIB perbarui checklist di 'PROJECT_BLUEPRINT.md' dari `- [ ]` menjadi `- [x]`.
+7. ACUHKAN dan JANGAN SENTUH atau MODIFIKASI file `.session.json` (file ini khusus untuk manajemen riwayat sesi aplikasi internal).
