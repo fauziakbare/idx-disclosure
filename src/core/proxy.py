@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import urllib.request
 from typing import Dict, List, Optional
 
@@ -50,6 +51,13 @@ def load_proxies() -> List[Dict[str, str]]:
     except Exception as e:
         logger.warning("Failed to fetch proxy list from URL: %s", e)
         return []
+
+
+def get_shuffled_proxies() -> List[Dict[str, str]]:
+    """Return a shuffled copy of the cached proxy pool."""
+    proxies = load_proxies().copy()
+    random.shuffle(proxies)
+    return proxies
 
 
 def get_proxy_config(attempt: int = 0) -> Optional[Dict[str, str]]:
