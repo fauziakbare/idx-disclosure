@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     FETCH_PAGE_SIZE: int = Field(default=30, description="Jumlah pengumuman yang ditarik per request")
     FETCH_INDEX_FROM: int = Field(default=1, description="Halaman awal penarikan IDX")
 
+    # Proxy Configuration (Optional - specifically for IDX Fetcher & PDF Parser)
+    PROXY_LIST_URL: str | None = Field(default=None, description="Webshare dynamic proxy list URL (plain text: ip:port:user:pass)")
+
     # Database
     DATABASE_URL: str = Field(default="sqlite+aiosqlite:///./idx_watcher.db", description="Database connection URL")
     TURSO_AUTH_TOKEN: str = Field(default="", description="Turso (libsql) auth token for cloud database")

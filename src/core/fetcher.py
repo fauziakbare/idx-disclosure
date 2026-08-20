@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from src.core.logger import logger
+from src.core.proxy import get_proxy_config
 
 # Identical UA shared across Playwright browser and any fallback requests.
 USER_AGENT = (
@@ -86,58 +87,76 @@ async def fetch_disclosures(limit: int = 30, **kwargs: Any) -> list[dict[str, An
     page_size = kwargs.get("page_size") or limit
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=BROWSER_ARGS,
-        )
-        context = await browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1920, "height": 1080},
-            locale="id-ID",
-            timezone_id="Asia/Jakarta",
-        )
-        # Mask navigator.webdriver flag
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
-        page = await context.new_page()
-
-        # Apply stealth evasions (mask CDP, WebGL, navigator, plugins)
-        from playwright_stealth import Stealth
-        await Stealth().apply_stealth_async(page)
-
-        # Realistic viewport & UA headers
-        await page.set_extra_http_headers({
-            "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-        })
-
-        # Handler to capture GetAnnouncement network responses
-        async def handle_response(response: Any) -> None:
-            if "GetAnnouncement" in response.url and response.status == 200:
-                try:
-                    data = await response.json()
-                    replies = (
-                        data.get("Replies")
-                        or data.get("replies")
-                        or data.get("data")
-                        or []
-                    )
-                    if replies:
-                        captured_raw.extend(replies)
-                        logger.info(
-                            "Captured %d disclosures from network stream.",
-                            len(replies),
-                        )
-                except Exception as e:
-                    logger.debug("Failed to parse intercepted response: %s", e)
-
-        page.on("response", handle_response)
-
         logger.info("Navigating to IDX announcement page...")
         for attempt in range(1, 4):
+            # Proxy rotation per attempt
+            proxy_cfg = get_proxy_config(attempt - 1)
+            launch_kwargs: dict[str, Any] = {
+                "headless": True,
+                "args": BROWSER_ARGS,
+            }
+            if proxy_cfg:
+                launch_kwargs["proxy"] = {
+                    "server": proxy_cfg["server"],
+                    **({"username": proxy_cfg["username"], "password": proxy_cfg["password"]} if "username" in proxy_cfg else {}),
+                }
+                logger.info("[Attempt %d] Using proxy: %s", attempt, proxy_cfg["server"])
+
+            browser = await p.chromium.launch(**launch_kwargs)
+            context = await browser.new_context(
+                user_agent=USER_AGENT,
+                viewport={"width": 1920, "height": 1080},
+                locale="id-ID",
+                timezone_id="Asia/Jakarta",
+            )
+            # Mask navigator.webdriver flag
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            page = await context.new_page()
+
+            # Bandwidth saver: block heavy assets (>80% savings)
+            await page.route(
+                "**/*",
+                lambda route: route.abort()
+                if route.request.resource_type in ["image", "media", "font", "stylesheet"]
+                else route.continue_(),
+            )
+
+            # Apply stealth evasions (mask CDP, WebGL, navigator, plugins)
+            from playwright_stealth import Stealth
+            await Stealth().apply_stealth_async(page)
+
+            # Realistic viewport & UA headers
+            await page.set_extra_http_headers({
+                "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+            })
+
+            # Handler to capture GetAnnouncement network responses
+            async def handle_response(response: Any) -> None:
+                if "GetAnnouncement" in response.url and response.status == 200:
+                    try:
+                        data = await response.json()
+                        replies = (
+                            data.get("Replies")
+                            or data.get("replies")
+                            or data.get("data")
+                            or []
+                        )
+                        if replies:
+                            captured_raw.extend(replies)
+                            logger.info(
+                                "Captured %d disclosures from network stream.",
+                                len(replies),
+                            )
+                    except Exception as e:
+                        logger.debug("Failed to parse intercepted response: %s", e)
+
+            page.on("response", handle_response)
+
             try:
                 # domcontentloaded (NOT networkidle) — IDX streams data forever,
                 # so networkidle never fires and times out.
@@ -231,8 +250,11 @@ async def fetch_disclosures(limit: int = 30, **kwargs: Any) -> list[dict[str, An
             except Exception as e:
                 logger.warning("Attempt %d navigation error: %s", attempt, e)
                 await asyncio.sleep(3)
+            finally:
+                await browser.close()
 
-        await browser.close()
+            if captured_raw:
+                break
 
     if not captured_raw:
         raise RuntimeError(

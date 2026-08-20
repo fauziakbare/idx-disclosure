@@ -11,6 +11,7 @@ from curl_cffi.requests import AsyncSession
 from src.core.fetcher import BASE_HEADERS, BROWSER_ARGS, USER_AGENT
 from src.core.llm_client import LLMClient
 from src.core.logger import logger
+from src.core.proxy import get_proxy_config
 
 # PDF download retry delays in seconds (403-gradual backoff).
 PDF_RETRY_DELAYS = [3, 6, 9]
@@ -32,10 +33,19 @@ async def download_pdf_via_browser(pdf_url: str) -> bytes:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=BROWSER_ARGS,
-        )
+        proxy_cfg = get_proxy_config(0)
+        launch_kwargs: dict[str, Any] = {
+            "headless": True,
+            "args": BROWSER_ARGS,
+        }
+        if proxy_cfg:
+            launch_kwargs["proxy"] = {
+                "server": proxy_cfg["server"],
+                **({"username": proxy_cfg["username"], "password": proxy_cfg["password"]} if "username" in proxy_cfg else {}),
+            }
+            logger.info("[PDF Browser] Using proxy: %s", proxy_cfg["server"])
+
+        browser = await p.chromium.launch(**launch_kwargs)
         context = await browser.new_context(
             user_agent=USER_AGENT,
             locale="id-ID",
@@ -45,6 +55,14 @@ async def download_pdf_via_browser(pdf_url: str) -> bytes:
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await context.new_page()
+
+        # Bandwidth saver: block heavy assets
+        await page.route(
+            "**/*",
+            lambda route: route.abort()
+            if route.request.resource_type in ["image", "media", "font", "stylesheet"]
+            else route.continue_(),
+        )
 
         # Apply stealth evasions before navigating to target URL
         from playwright_stealth import Stealth
@@ -200,7 +218,11 @@ async def extract_pdf(
         max_retries = len(PDF_RETRY_DELAYS)
         for attempt in range(max_retries):
             try:
-                async with AsyncSession(impersonate="chrome124") as session:
+                proxy_cfg = get_proxy_config(attempt)
+                proxies = {"http": proxy_cfg["curl_url"], "https": proxy_cfg["curl_url"]} if proxy_cfg else None
+                if proxy_cfg:
+                    logger.info("[PDF Download Attempt %d] Using proxy: %s", attempt + 1, proxy_cfg["server"])
+                async with AsyncSession(impersonate="chrome124", proxies=proxies) as session:
                     resp = await session.get(pdf_url, headers=headers, timeout=60)
                     if resp.status_code == 403:
                         raise RuntimeError("HTTP 403 Forbidden (WAF block)")
