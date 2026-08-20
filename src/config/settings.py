@@ -6,13 +6,13 @@ class Settings(BaseSettings):
     # Role 1: Triage & Vision
     TRIAGE_BASE_URL: str = Field(default="", description="Base URL for Triage LLM API")
     TRIAGE_API_KEY: str = Field(default="", description="API key for Triage LLM")
-    TRIAGE_MODEL_NAME: str = Field(default="", description="Model name for Triage LLM")
-    TRIAGE_VISION_MODEL_NAME: str = Field(default="", description="Vision model name for PDF fallback")
+    TRIAGE_MODEL_NAME: str = Field(default="gemini/gemini-3.5-flash-lite", description="Model name for Triage LLM")
+    TRIAGE_VISION_MODEL_NAME: str = Field(default="gemini/gemini-3.5-flash-lite", description="Vision model name for PDF fallback")
 
     # Role 2: Extractor, Reasoner & Writer
     REASONER_BASE_URL: str = Field(default="", description="Base URL for Reasoner LLM API")
     REASONER_API_KEY: str = Field(default="", description="API key for Reasoner LLM")
-    REASONER_MODEL_NAME: str = Field(default="", description="Model name for Reasoner LLM")
+    REASONER_MODEL_NAME: str = Field(default="gemini/gemini-3.5-flash-lite", description="Model name for Reasoner LLM")
 
     # Telegram
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Telegram bot token")
@@ -41,6 +41,16 @@ class Settings(BaseSettings):
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
     }
+
+    def get_triage_api_key(self) -> str:
+        """Return TRIAGE_API_KEY or fallback to GEMINI_API_KEY."""
+        import os
+        return self.TRIAGE_API_KEY or os.getenv("GEMINI_API_KEY", "")
+
+    def get_reasoner_api_key(self) -> str:
+        """Return REASONER_API_KEY or fallback to GEMINI_API_KEY."""
+        import os
+        return self.REASONER_API_KEY or os.getenv("GEMINI_API_KEY", "")
 
 
 settings = Settings()

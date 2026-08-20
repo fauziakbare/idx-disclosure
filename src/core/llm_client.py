@@ -85,28 +85,41 @@ class LLMClient:
         return content
 
 
+def _ensure_gemini_prefix(model_name: str) -> str:
+    """Ensure model name has gemini/ provider prefix for litellm."""
+    if not model_name.startswith("gemini/"):
+        return f"gemini/{model_name}"
+    return model_name
+
+
 def create_triage_client(settings: Any) -> LLMClient:
     """Create LLM client for Role-1 Triage from app settings."""
+    model = _ensure_gemini_prefix(settings.TRIAGE_MODEL_NAME or "gemini/gemini-3.5-flash-lite")
+    api_key = settings.get_triage_api_key()
     return LLMClient(
         base_url=settings.TRIAGE_BASE_URL,
-        api_key=settings.TRIAGE_API_KEY,
-        model=settings.TRIAGE_MODEL_NAME,
+        api_key=api_key,
+        model=model,
     )
 
 
 def create_vision_client(settings: Any) -> LLMClient:
     """Create LLM client for PDF Vision fallback from app settings."""
+    model = _ensure_gemini_prefix(settings.TRIAGE_VISION_MODEL_NAME or "gemini/gemini-3.5-flash-lite")
+    api_key = settings.get_triage_api_key()
     return LLMClient(
         base_url=settings.TRIAGE_BASE_URL,
-        api_key=settings.TRIAGE_API_KEY,
-        model=settings.TRIAGE_VISION_MODEL_NAME,
+        api_key=api_key,
+        model=model,
     )
 
 
 def create_reasoner_client(settings: Any) -> LLMClient:
     """Create LLM client for Role-2 Reasoner from app settings."""
+    model = _ensure_gemini_prefix(settings.REASONER_MODEL_NAME or "gemini/gemini-3.5-flash-lite")
+    api_key = settings.get_reasoner_api_key()
     return LLMClient(
         base_url=settings.REASONER_BASE_URL,
-        api_key=settings.REASONER_API_KEY,
-        model=settings.REASONER_MODEL_NAME,
+        api_key=api_key,
+        model=model,
     )
