@@ -12,6 +12,37 @@ from src.core.logger import logger
 _CACHED_PROXIES: List[Dict[str, str]] = []
 
 
+def parse_proxy_line(line: str) -> dict | None:
+    """Strictly parse a proxy line in `ip:port:username:password` format.
+
+    Returns a proxy config dict, or None for empty lines, comment lines, or
+    lines that do not match the expected 2- or 4-part format.
+    """
+    clean_line = line.strip()
+    if not clean_line or clean_line.startswith("#"):
+        return None
+    parts = clean_line.split(":")
+    if len(parts) == 4:
+        ip, port, user, pwd = parts
+        return {
+            "server": f"http://{ip}:{port}",
+            "username": user,
+            "password": pwd,
+            "curl_url": f"http://{user}:{pwd}@{ip}:{port}",
+            "ip": ip,
+            "port": port,
+        }
+    elif len(parts) == 2:
+        ip, port = parts
+        return {
+            "server": f"http://{ip}:{port}",
+            "curl_url": f"http://{ip}:{port}",
+            "ip": ip,
+            "port": port,
+        }
+    return None
+
+
 def load_proxies() -> List[Dict[str, str]]:
     """Download and parse plain text proxy list from Webshare URL."""
     global _CACHED_PROXIES
@@ -29,22 +60,10 @@ def load_proxies() -> List[Dict[str, str]]:
         with urllib.request.urlopen(req, timeout=10) as resp:
             content = resp.read().decode("utf-8")
             proxies: List[Dict[str, str]] = []
-            for line in content.strip().splitlines():
-                parts = line.strip().split(":")
-                if len(parts) == 4:
-                    ip, port, user, pwd = parts
-                    proxies.append({
-                        "server": f"http://{ip}:{port}",
-                        "username": user,
-                        "password": pwd,
-                        "curl_url": f"http://{user}:{pwd}@{ip}:{port}",
-                    })
-                elif len(parts) == 2:
-                    ip, port = parts
-                    proxies.append({
-                        "server": f"http://{ip}:{port}",
-                        "curl_url": f"http://{ip}:{port}",
-                    })
+            for line in content.splitlines():
+                proxy_cfg = parse_proxy_line(line)
+                if proxy_cfg is not None:
+                    proxies.append(proxy_cfg)
             _CACHED_PROXIES = proxies
             logger.info("Loaded %d proxies from Webshare URL.", len(_CACHED_PROXIES))
             return _CACHED_PROXIES

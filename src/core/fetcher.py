@@ -101,21 +101,34 @@ async def fetch_disclosures(limit: int = 30, **kwargs: Any) -> list[dict[str, An
                 "args": BROWSER_ARGS,
             }
             if proxy_cfg:
-                launch_kwargs["proxy"] = {
+                launch_kwargs["proxy"] = proxy_payload = {
                     "server": proxy_cfg["server"],
-                    **({"username": proxy_cfg["username"], "password": proxy_cfg["password"]} if "username" in proxy_cfg else {}),
                 }
-                logger.info("[Attempt %d] Using proxy: %s", attempt, proxy_cfg["server"])
+                if "username" in proxy_cfg and "password" in proxy_cfg:
+                    proxy_payload["username"] = proxy_cfg["username"]
+                    proxy_payload["password"] = proxy_cfg["password"]
+                logger.info(
+                    "[Attempt %d] Connecting via proxy %s (Auth: %s)",
+                    attempt,
+                    proxy_cfg["server"],
+                    "yes" if "username" in proxy_payload else "no",
+                )
 
             browser = None
             try:
                 browser = await p.chromium.launch(**launch_kwargs)
-                context = await browser.new_context(
-                    user_agent=USER_AGENT,
-                    viewport={"width": 1920, "height": 1080},
-                    locale="id-ID",
-                    timezone_id="Asia/Jakarta",
-                )
+                context_kwargs = {
+                    "user_agent": USER_AGENT,
+                    "viewport": {"width": 1920, "height": 1080},
+                    "locale": "id-ID",
+                    "timezone_id": "Asia/Jakarta",
+                }
+                if proxy_cfg and "username" in proxy_cfg and "password" in proxy_cfg:
+                    context_kwargs["http_credentials"] = {
+                        "username": proxy_cfg["username"],
+                        "password": proxy_cfg["password"],
+                    }
+                context = await browser.new_context(**context_kwargs)
                 # Mask navigator.webdriver flag
                 await context.add_init_script(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
