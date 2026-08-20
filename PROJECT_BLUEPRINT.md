@@ -198,6 +198,7 @@ Catatan: Semua task di bawah masih PENDING (`- [ ]`).
 - `[x]` T1.6: Implementasi PDF Stream Extractor dan fallback Cloud Vision.
 - `[x]` T1.7: Implementasi Telegram Command Center + Auth Guard.
 - `[x]` T1.8: Integration test end-to-end dengan `mock_disclosures.json`.
+- `[x]` T1.9: Deduplikasi sebelum Triage — skip disclosure yang sudah diproses (`get_existing_ids` batch query; `--force` bypass).
 
 ### Phase 2: Cloud Deployment
 
@@ -346,3 +347,4 @@ Setelah selesai mengimplementasikan dan memverifikasi kode berjalan tanpa error,
 | 2026-08-20 | v1.4 | Integrasi `playwright-stealth` (`Stealth().apply_stealth_async`) untuk evasi deteksi headless: masking CDP, WebGL, navigator, plugins via `add_init_script` otomatis; dipasang di `src/core/fetcher.py` (sebelum intercept) dan fallback PDF `src/modules/extractor/pdf_parser.py` (sebelum navigasi). Header ekstra `Sec-Ch-Ua` ditambahkan. Commit `05f93fa`. |
 | 2026-08-20 | v1.5 | Dynamic Webshare proxy rotation & bandwidth saver: modul `src/core/proxy.py` (download/parse/cache proxy list URL, rotasi per attempt); proxy injection ke Playwright `launch_kwargs` dan curl_cffi `AsyncSession`; resource blocking (`image/media/font/stylesheet` abort) hemat >80% bandwidth; LLM & Telegram tetap direct (no global HTTP_PROXY); workflow env `PROXY_LIST_URL` added. Commit `87bada7`. |
 | 2026-08-20 | v1.6 | Perbaikan `ERR_TUNNEL_CONNECTION_FAILED`: pool proxy di-shuffle via `get_shuffled_proxies()`; retries naik ke 6 attempt (`range(1,7)`) dengan rotasi proxy `pool[attempt % len(pool)]`; backoff `asyncio.sleep(3*(attempt+1))` agar rate limit/socket Webshare reset; `browser.close()` dijamin di `finally`, playwright stop via context manager (no lingering connections). Commit `7bd9bc5`. |
+| 2026-08-21 | v1.7 | Dedup sebelum triage: `fetcher._normalize_item` tambah field `id` (Id2/NoPengumuman); `db.get_existing_ids()` batch query (chunk 500 < SQLite var limit) cek ID yang sudah ada; `main.py` skip disclosure sudah diproses kecuali `--force`. Cegah duplikasi analisis & alert berulang. |

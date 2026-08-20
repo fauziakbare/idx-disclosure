@@ -15,6 +15,7 @@ from src.core.db import (
     close_db,
     get_draft_threads,
     get_draft_x,
+    get_existing_ids,
     get_financial_analysis,
     init_db,
     save_analysis,
@@ -176,6 +177,22 @@ async def run_pipeline(*, force: bool = False) -> None:
     if not raw_disclosures:
         logger.warning("No disclosures fetched. Check IDX_API_BASE_URL and date range.")
         return
+
+    # Dedup: skip disclosures already processed in previous runs (unless force)
+    if not force:
+        existing_ids = await get_existing_ids([d.get("id") or "" for d in raw_disclosures])
+        new_disclosures = [d for d in raw_disclosures if (d.get("id") or "") not in existing_ids]
+        logger.info(
+            "Deduplication: %d new disclosures to process out of %d fetched "
+            "(%d already in DB)",
+            len(new_disclosures),
+            len(raw_disclosures),
+            len(existing_ids),
+        )
+        if not new_disclosures:
+            logger.info("No new disclosures found since last run. Pipeline complete.")
+            return
+        raw_disclosures = new_disclosures
 
     # Stage 1: Regex pre-filter
     stage1_results = filter_stage1(raw_disclosures)

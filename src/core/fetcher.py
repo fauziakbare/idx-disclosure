@@ -362,8 +362,10 @@ def _normalize_item(raw: dict[str, Any]) -> dict[str, Any]:
 
     emiten_code = (pengumuman.get("Kode_Emiten") or "").strip()
     title = pengumuman.get("JudulPengumuman") or ""
+    disclosure_id = str(pengumuman.get("Id2") or pengumuman.get("NoPengumuman") or "")
 
     return {
+        "id": disclosure_id,
         "title": title,
         "emiten_code": emiten_code,
         "pdf_url": pdf_url,

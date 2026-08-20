@@ -175,6 +175,29 @@ async def init_db() -> None:
     logger.info("Database initialized at %s", path)
 
 
+def _chunk_ids(ids: list[str], size: int = 500) -> list[list[str]]:
+    """Split ID list into chunks under SQLite's variable limit (~999)."""
+    return [ids[i : i + size] for i in range(0, len(ids), size)]
+
+
+async def get_existing_ids(ids: list[str]) -> set[str]:
+    """Return subset of given IDs that already exist in disclosures table.
+
+    Batch-safe: chunks queries to stay under SQLite's variable limit.
+    """
+    if not ids:
+        return set()
+    existing: set[str] = set()
+    for chunk in _chunk_ids(ids):
+        placeholders = ",".join("?" for _ in chunk)
+        query = f"SELECT id FROM disclosures WHERE id IN ({placeholders})"
+        rows = await _fetch_rows(query, list(chunk))
+        for row in rows:
+            if row[0] is not None:
+                existing.add(str(row[0]))
+    return existing
+
+
 async def save_analysis(
     disclosure_id: str,
     emiten_code: str,
