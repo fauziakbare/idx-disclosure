@@ -243,6 +243,7 @@ async def run_pipeline(*, force: bool = False) -> None:
         # Extract text from ALL attachments and join
         all_texts: list[str] = []
         method = "none"
+        first_page_image: bytes | None = None
         for i, url in enumerate(all_pdf_urls):
             extraction = await extract_pdf(url, vision_client=vision_client)
             part_text = extraction["text"]
@@ -252,6 +253,7 @@ async def run_pipeline(*, force: bool = False) -> None:
                 all_texts.append(part_text)
             if i == 0:
                 method = part_method  # primary method from first PDF
+                first_page_image = extraction.get("first_page_image")
 
         extracted_text = "\n\n--- ATTACHMENT BREAK ---\n\n".join(all_texts)
         logger.info("Combined extraction: %d chars from %d attachments", len(extracted_text), len(all_texts))
@@ -302,9 +304,17 @@ async def run_pipeline(*, force: bool = False) -> None:
             release_date=release_date or None,
         )
 
-        # Send 3 sequential messages per emiten
+        # Send 3 sequential messages per emiten.
+        # Message 1: summary + PDF first-page screenshot (photo) when available.
         try:
-            await notifier.send_message(_build_pesan_1(analysis, release_date), parse_mode="Markdown")
+            if first_page_image:
+                await notifier.send_photo(
+                    first_page_image,
+                    caption=_build_pesan_1(analysis, release_date),
+                    parse_mode="Markdown",
+                )
+            else:
+                await notifier.send_message(_build_pesan_1(analysis, release_date), parse_mode="Markdown")
             await notifier.send_message(
                 _build_pesan_2(analysis.emiten_code, analysis.draft_x),
                 parse_mode="Markdown",

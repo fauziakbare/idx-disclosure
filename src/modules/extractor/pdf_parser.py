@@ -194,6 +194,31 @@ async def extract_text_vision(
         return ""
 
 
+def extract_first_page_image(pdf_bytes: bytes, dpi: int = 150) -> bytes | None:
+    """Render first page of PDF as PNG bytes.
+
+    Args:
+        pdf_bytes: Raw PDF file bytes.
+        dpi: Render resolution (default 150).
+
+    Returns:
+        PNG bytes of page 1, or None if render fails / PDF empty.
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if len(doc) == 0:
+            doc.close()
+            return None
+        page = doc[0]
+        pix = page.get_pixmap(dpi=dpi)
+        img_bytes = pix.tobytes("png")
+        doc.close()
+        return img_bytes
+    except Exception as e:
+        logger.error("First-page image render failed: %s", e)
+        return None
+
+
 async def extract_pdf(
     pdf_url: str,
     vision_client: LLMClient | None = None,
@@ -208,7 +233,7 @@ async def extract_pdf(
         vision_client: Optional vision-capable LLM client for fallback.
 
     Returns:
-        Dict with keys: text, method, pages_count.
+        Dict with keys: text, method, pages_count, first_page_image (PNG bytes | None).
     """
     # Download PDF as bytes using curl_cffi (TLS impersonation to bypass Cloudflare)
     pdf_bytes = b""
@@ -241,7 +266,10 @@ async def extract_pdf(
                         logger.info("PDF downloaded via browser fallback: %d bytes", len(pdf_bytes))
                     except Exception as browser_err:
                         logger.error("Browser PDF fallback also failed for %s: %s", pdf_url, browser_err)
-                        return {"text": "", "method": "download_failed", "pages_count": 0}
+                        return {"text": "", "method": "download_failed", "pages_count": 0, "first_page_image": None}
+
+    # Render first page image once (PNG bytes for Telegram photo)
+    first_page_image = extract_first_page_image(pdf_bytes)
 
     # Try PyMuPDF first
     text = extract_text_pymupdf(pdf_bytes)
@@ -251,6 +279,7 @@ async def extract_pdf(
             "text": text,
             "method": "pymupdf",
             "pages_count": text.count("\f") + 1,
+            "first_page_image": first_page_image,
         }
 
     # Fallback to Vision if available
@@ -263,6 +292,7 @@ async def extract_pdf(
                 "text": vision_text,
                 "method": "vision_llm",
                 "pages_count": vision_text.count("\n\n") + 1,
+                "first_page_image": first_page_image,
             }
 
     # Return whatever we got
@@ -270,4 +300,5 @@ async def extract_pdf(
         "text": text or "",
         "method": "pymupdf_partial" if text else "failed",
         "pages_count": 0,
+        "first_page_image": first_page_image,
     }

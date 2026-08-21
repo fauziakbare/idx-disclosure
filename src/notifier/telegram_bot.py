@@ -129,6 +129,42 @@ class TelegramNotifier:
         logger.info("Telegram message sent to %s (%d chars)", self._chat_id, len(text))
         return data
 
+    async def send_photo(
+        self,
+        photo_bytes: bytes,
+        caption: str = "",
+        parse_mode: str = "Markdown",
+    ) -> dict[str, Any]:
+        """Send a photo (PNG/JPEG bytes) with optional caption to configured chat.
+
+        Args:
+            photo_bytes: Raw image bytes (PNG/JPEG).
+            caption: Optional caption (limited to 1024 chars by Telegram).
+            parse_mode: Parse mode for caption (Markdown, HTML, or None).
+
+        Returns:
+            Telegram API response dict.
+        """
+        payload: dict[str, Any] = {
+            "chat_id": self._chat_id,
+        }
+        # Telegram caption limit is 1024 chars.
+        if caption:
+            payload["caption"] = caption[:1024]
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+
+        files = {"photo": ("page1.png", photo_bytes, "image/png")}
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=12.0, read=60.0, write=60.0, pool=15.0)) as client:
+            resp = await _request_with_retry(
+                client, "POST", f"{self._base_url}/sendPhoto", data=payload, files=files,
+            )
+            data = resp.json()
+
+        logger.info("Telegram photo sent to %s (%d bytes)", self._chat_id, len(photo_bytes))
+        return data
+
 class TelegramCommandBot:
     """Simple command bot for manual pipeline triggers and inline button callbacks."""
 
